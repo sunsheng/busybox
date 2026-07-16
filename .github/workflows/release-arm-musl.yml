@@ -5,10 +5,11 @@ name: Build & release ARM musl static busybox
 # `readelf` and qemu-arm, then publishes the binary as a GitHub Release.
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
+  pull_request:
     paths:
       - '.github/workflows/release-arm-musl.yml'
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -99,6 +100,7 @@ jobs:
           path: dist/
 
       - name: Create / update GitHub Release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
