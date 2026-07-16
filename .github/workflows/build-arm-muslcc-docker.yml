@@ -19,7 +19,6 @@ concurrency:
 
 env:
   IMAGE: muslcc/x86_64:arm-linux-musleabihf
-  CROSS: arm-linux-musleabihf-
 
 jobs:
   build:
@@ -31,19 +30,29 @@ jobs:
       - name: Build static ARM busybox inside the muslcc image
         run: |
           set -eu
-          docker run --rm -v "$PWD:/src" -w /src -e CROSS="$CROSS" "$IMAGE" sh -euxc '
-            # Alpine image: pull in the tools busybox needs to build.
-            apk add --no-cache make bash perl tar
-            "${CROSS}gcc" --version | head -1
+          docker run --rm -v "$PWD:/src" -w /src "$IMAGE" sh -euxc '
+            # Alpine image: install make/perl/tar for the build, plus a *native*
+            # gcc (HOSTCC) — busybox first compiles host tools like fixdep, which
+            # must run on the x86_64 build host, not the ARM target.
+            apk add --no-cache make bash perl tar bzip2 gcc musl-dev
+            # The musl cross toolchain ships in the image but its bin dir is not
+            # on PATH; auto-detect it and derive the CROSS_COMPILE prefix.
+            cross_gcc=$(find / -type f -name "*-linux-musleabihf-gcc" 2>/dev/null | head -1)
+            [ -n "$cross_gcc" ] || { echo "ERROR: cross gcc not found in image"; exit 1; }
+            bindir=$(dirname "$cross_gcc")
+            cross=$(basename "$cross_gcc" | sed "s/gcc$//")
+            export PATH="$bindir:$PATH"
+            echo "cross prefix: $cross ; bin dir: $bindir"
+            "${cross}gcc" --version | head -1
             make defconfig
             # Static linking against musl:
             sed -i "s/# CONFIG_STATIC is not set/CONFIG_STATIC=y/" .config
-            sed -i "s#CONFIG_CROSS_COMPILER_PREFIX=\"\"#CONFIG_CROSS_COMPILER_PREFIX=\"${CROSS}\"#" .config
+            sed -i "s#CONFIG_CROSS_COMPILER_PREFIX=\"\"#CONFIG_CROSS_COMPILER_PREFIX=\"${cross}\"#" .config
             # Disable x86-only SHA-NI hardware acceleration; it does not build for ARM.
             sed -i "s/CONFIG_SHA1_HWACCEL=y/# CONFIG_SHA1_HWACCEL is not set/" .config
             sed -i "s/CONFIG_SHA256_HWACCEL=y/# CONFIG_SHA256_HWACCEL is not set/" .config
-            yes "" | make oldconfig CROSS_COMPILE="${CROSS}"
-            make -j"$(nproc)" CROSS_COMPILE="${CROSS}"
+            yes "" | make oldconfig CROSS_COMPILE="${cross}"
+            make -j"$(nproc)" CROSS_COMPILE="${cross}"
           '
 
       - name: Verify it is a static ARM binary (file + readelf)
