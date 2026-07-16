@@ -41,10 +41,16 @@ jobs:
             {
               echo 'deb http://archive.debian.org/debian jessie main'
               echo 'deb http://archive.debian.org/debian-security jessie/updates main'
+              echo 'deb http://archive.debian.org/debian jessie-backports main'
             } > /etc/apt/sources.list
             echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
             apt-get -o Acquire::AllowInsecureRepositories=true update
             apt-get install -y --allow-unauthenticated gcc make bzip2 binutils
+            # 把内核 UAPI 头文件升级到 4.9（jessie-backports 归档源）。现代 busybox 的
+            # ip/iplink 等 applet 用到较新的 CAN / netlink 常量（CAN_CTRLMODE_FD_NON_ISO
+            # 等，内核 4.0~4.6 才引入），而 jessie 自带的 3.16 头文件没有。
+            # 注意：这只升级编译期头文件，glibc 保持不变，也不引入任何运行期依赖。
+            apt-get install -y --allow-unauthenticated -t jessie-backports linux-libc-dev
 
             # 2. 验证当前环境的 glibc 版本
             ldd --version
