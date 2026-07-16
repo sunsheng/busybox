@@ -14,8 +14,17 @@ on:
 permissions:
   contents: write
 
+# A newer run supersedes an in-progress one (e.g. if a mirror hangs).
+concurrency:
+  group: release-arm-musl
+  cancel-in-progress: true
+
 env:
-  TOOLCHAIN_URL: https://musl.cc/arm-linux-musleabihf-cross.tgz
+  # Primary is the requested musl.cc URL; the more.musl.cc mirror (GCC 11,
+  # matching the primary) is a fallback since musl.cc can be flaky from CI.
+  TOOLCHAIN_URLS: |
+    https://musl.cc/arm-linux-musleabihf-cross.tgz
+    https://more.musl.cc/11/x86_64-linux-musl/arm-linux-musleabihf-cross.tgz
   CROSS: arm-linux-musleabihf-
   TAG: busybox-arm-musl-static
 
@@ -34,10 +43,23 @@ jobs:
       - name: Fetch musl cross toolchain
         run: |
           set -eu
-          for i in 1 2 3 4 5; do
-            wget -q "$TOOLCHAIN_URL" -O /tmp/toolchain.tgz && break
-            echo "download attempt $i failed, retrying in 5s..."; sleep 5
+          ok=
+          for attempt in 1 2 3; do
+            for url in $TOOLCHAIN_URLS; do
+              echo "attempt $attempt: $url"
+              # Fail fast on a stalled mirror instead of hanging: cap the whole
+              # transfer and require steady progress.
+              if wget -q --tries=1 --timeout=60 --dns-timeout=30 \
+                      --connect-timeout=30 --read-timeout=120 \
+                      "$url" -O /tmp/toolchain.tgz && tar tzf /tmp/toolchain.tgz >/dev/null 2>&1; then
+                echo "downloaded from $url"; ok=1; break
+              fi
+              echo "  failed: $url"; rm -f /tmp/toolchain.tgz
+            done
+            [ -n "$ok" ] && break
+            echo "all mirrors failed on attempt $attempt, retrying in 10s..."; sleep 10
           done
+          [ -n "$ok" ] || { echo "ERROR: could not fetch the musl toolchain"; exit 1; }
           mkdir -p "$HOME/toolchain"
           tar xzf /tmp/toolchain.tgz -C "$HOME/toolchain"
           echo "$HOME/toolchain/arm-linux-musleabihf-cross/bin" >> "$GITHUB_PATH"
@@ -99,7 +121,7 @@ jobs:
             echo "Fully static **32-bit ARM (armhf, hard-float)** BusyBox, built entirely in CI"
             echo "by this repository's \`Build & release ARM musl static busybox\` workflow."
             echo
-            echo "- **Toolchain:** \`arm-linux-musleabihf-cross\` (musl) from <${TOOLCHAIN_URL}>"
+            echo "- **Toolchain:** \`arm-linux-musleabihf-cross\` (musl) from <https://musl.cc/arm-linux-musleabihf-cross.tgz>"
             echo "- **Linking:** \`CONFIG_STATIC=y\` — no shared libraries, no dynamic loader"
             echo "- **BusyBox:** ${BB_VER}, ${APPLETS} applets"
             echo "- **Disabled feature:** x86-only SHA hardware acceleration"
