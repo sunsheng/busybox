@@ -1,10 +1,17 @@
 name: Build with GLIBC 2.21 (Debian 8)
 
 # Builds a 32-bit ARM (armv7/armhf) BusyBox against an old glibc (2.21 level)
-# by compiling *inside* a Debian 8 "Jessie" armhf container via QEMU. Linking
-# against glibc 2.21 keeps the binary compatible with old ARM systems. GNU gcc
+# by compiling *inside* a Debian 8 "Jessie" armhf container via QEMU. GNU gcc
 # is used (not musl / not cross): the build is native inside the emulated armhf
-# container. objdump confirms the GLIBC symbol versions the binary depends on.
+# container, and glibc is linked DYNAMICALLY (not static) — this keeps the
+# binary small and compatible with old ARM systems running glibc 2.21.
+#
+# Requirement enforced below: the binary may depend on glibc's shared libraries
+# only. It must be a dynamic executable (an INTERP / ld-linux loader present),
+# and every NEEDED entry must be a glibc library (libc/libm/libdl/libpthread/
+# librt/libresolv/libcrypt/libnss_* + ld-linux-armhf). Any other shared-library
+# dependency (libz, libssl, libselinux, libpam, ...) fails the job. Verified
+# with both readelf (-d NEEDED / -l INTERP) and objdump (-p).
 on: [push]
 
 jobs:
@@ -25,18 +32,49 @@ jobs:
           run: |
             set -eu
             # 1. 更新古老发行版的软件源并安装基础编译工具
-            apt-get update && apt-get install -y gcc make bzip2
+            #    binutils 提供 readelf / objdump 用于后面的验证
+            apt-get update && apt-get install -y gcc make bzip2 binutils
 
             # 2. 验证当前环境的 glibc 版本
             ldd --version
 
             # 3. 正常执行编译（GNU gcc，原生 armhf 编译）
+            #    defconfig 默认动态链接（不加 CONFIG_STATIC），glibc 以动态库形式链接
             make defconfig
             make -j"$(nproc)"
 
-            # 4. 验证生成的二进制文件符号信息
+            # 4. 验证：必须是动态链接可执行文件，且除 glibc 外没有任何其他动态库依赖
             file busybox
-            objdump -p busybox | grep GLIBC || true
+            echo "===== readelf -d (dynamic section, NEEDED) ====="
+            readelf -d busybox | grep NEEDED || true
+            echo "===== readelf -l (program headers, INTERP) ====="
+            readelf -l busybox | grep INTERP || true
+            echo "===== objdump -p (dynamic + version refs) ====="
+            objdump -p busybox | grep -E 'NEEDED|GLIBC' || true
+
+            echo "===== 校验动态依赖只能是 glibc ====="
+            # 4a. 必须存在动态加载器 INTERP（即：不是静态链接）
+            if ! readelf -l busybox | grep -q INTERP; then
+              echo "ERROR: 没有 INTERP 段 —— 这是静态链接的二进制，不符合要求（需要动态链接 glibc）"; exit 1
+            fi
+            # 4b. 遍历所有 NEEDED 条目，只允许 glibc 提供的共享库
+            #     glibc 提供：libc/libm/libdl/libpthread/librt/libresolv/libcrypt/libutil/libnss_*/libanl
+            #     以及动态加载器 ld-linux-armhf.so.3 / ld-linux.so.3
+            allow='^(libc|libm|libdl|libpthread|librt|libresolv|libcrypt|libutil|libanl|libnss_[a-z0-9]+|ld-linux(-armhf)?)\.so'
+            bad=0
+            for lib in $(readelf -d busybox | awk -F'[][]' '/NEEDED/ {print $2}'); do
+              if echo "$lib" | grep -Eq "$allow"; then
+                echo "OK  (glibc): $lib"
+              else
+                echo "BAD (非 glibc 依赖): $lib"; bad=1
+              fi
+            done
+            if [ "$bad" -ne 0 ]; then
+              echo "ERROR: 发现 glibc 之外的动态库依赖，不符合要求"; exit 1
+            fi
+            echo "PASS: 动态链接 glibc，且没有任何其他动态库依赖"
+
+            # 5. 冒烟测试
             ./busybox | head -1
             echo "applets: $(./busybox --list | wc -l)"
 
