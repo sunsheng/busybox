@@ -6,12 +6,7 @@ name: Build ARM musl static busybox (muslcc Docker Hub image)
 # *inside* that container, so the arm-linux-musleabihf- toolchain is already on
 # PATH — no tarball download or mirror fallback needed. The resulting binary is
 # verified with file / readelf and qemu-arm, then uploaded as a CI artifact.
-on:
-  workflow_dispatch:
-  push:
-    branches: [master]
-    paths:
-      - '.github/workflows/build-arm-muslcc-docker.yml'
+on: [push]
 
 # A newer run supersedes an in-progress one.
 concurrency:
