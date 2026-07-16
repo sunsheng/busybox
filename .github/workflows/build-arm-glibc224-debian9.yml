@@ -16,7 +16,10 @@ name: Build with GLIBC 2.24 (Debian 9)
 # librt/libresolv/libcrypt/libnss_* + ld-linux-armhf). Any other shared-library
 # dependency (libz, libssl, libselinux, libpam, ...) fails the job. Verified
 # with both readelf (-d NEEDED / -l INTERP) and objdump (-p).
-on: [push]
+on:
+  pull_request:
+  release:
+    types: [published]
 
 jobs:
   build_legacy_glibc:
