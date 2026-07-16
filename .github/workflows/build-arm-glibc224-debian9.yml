@@ -1,10 +1,14 @@
-name: Build with GLIBC 2.21 (Debian 8)
+name: Build with GLIBC 2.24 (Debian 9)
 
-# Builds a 32-bit ARM (armv7/armhf) BusyBox against an old glibc (2.21 level)
-# by compiling *inside* a Debian 8 "Jessie" armhf container via QEMU. GNU gcc
-# is used (not musl / not cross): the build is native inside the emulated armhf
+# Builds a 32-bit ARM (armv7/armhf) BusyBox against an old glibc (2.24) by
+# compiling *inside* a Debian 9 "Stretch" armhf container via QEMU. GNU gcc is
+# used (not musl / not cross): the build is native inside the emulated armhf
 # container, and glibc is linked DYNAMICALLY (not static) — this keeps the
-# binary small and compatible with old ARM systems running glibc 2.21.
+# binary small and compatible with old ARM systems running glibc 2.24.
+#
+# Stretch is chosen over jessie because it ships glibc 2.24 with gcc 6.3 and,
+# crucially, linux-libc-dev 4.9 kernel headers — modern BusyBox needs the newer
+# CAN/netlink UAPI constants that jessie's 3.16 headers lack.
 #
 # Requirement enforced below: the binary may depend on glibc's shared libraries
 # only. It must be a dynamic executable (an INTERP / ld-linux loader present),
@@ -22,37 +26,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build inside Debian 8 (Jessie) armhf container
+      - name: Build inside Debian 9 (Stretch) armhf container
         uses: uraimo/run-on-arch-action@v2
         with:
-          # run-on-arch-action 没有内置 debian8 的 Dockerfile，直接用官方的
-          # armhf Debian 8 (Jessie) 基础镜像。arch 仍用于选择 QEMU 静态解释器。
+          # run-on-arch-action 没有内置 stretch 的 Dockerfile，直接用官方的
+          # armhf Debian 9 (Stretch) 基础镜像。arch 仍用于选择 QEMU 静态解释器。
           arch: armv7
-          base_image: arm32v7/debian:jessie
+          base_image: arm32v7/debian:stretch
 
           run: |
             set -eu
             # 1. 修正软件源并安装基础编译工具
-            #    Debian 8 (Jessie) 已 EOL，官方镜像已迁移到 archive.debian.org，
+            #    Debian 9 (Stretch) 已 EOL，官方镜像已迁移到 archive.debian.org，
             #    默认源会 404；需改用归档源并关闭 Valid-Until / 过期签名校验。
-            #    必须同时加入 security（jessie/updates）套件：基础镜像里已预装了
-            #    带安全更新（+deb8u*）的库，只用 main（+b*）会导致版本无法满足依赖。
+            #    同时加入 security（stretch/updates）套件：基础镜像里已预装了带安全
+            #    更新（+deb9u*）的库，只用 main 会导致版本无法满足依赖。
             #    binutils 提供 readelf / objdump 用于后面的验证。
             {
-              echo 'deb http://archive.debian.org/debian jessie main'
-              echo 'deb http://archive.debian.org/debian-security jessie/updates main'
-              echo 'deb http://archive.debian.org/debian jessie-backports main'
+              echo 'deb http://archive.debian.org/debian stretch main'
+              echo 'deb http://archive.debian.org/debian-security stretch/updates main'
             } > /etc/apt/sources.list
             echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
             apt-get -o Acquire::AllowInsecureRepositories=true update
             apt-get install -y --allow-unauthenticated gcc make bzip2 binutils
-            # 把内核 UAPI 头文件升级到 4.9（jessie-backports 归档源）。现代 busybox 的
-            # ip/iplink 等 applet 用到较新的 CAN / netlink 常量（CAN_CTRLMODE_FD_NON_ISO
-            # 等，内核 4.0~4.6 才引入），而 jessie 自带的 3.16 头文件没有。
-            # 注意：这只升级编译期头文件，glibc 保持不变，也不引入任何运行期依赖。
-            apt-get install -y --allow-unauthenticated -t jessie-backports linux-libc-dev
 
-            # 2. 验证当前环境的 glibc 版本
+            # 2. 验证当前环境的 glibc 版本（stretch 为 2.24）
             ldd --version
 
             # 3. 正常执行编译（GNU gcc，原生 armhf 编译）
@@ -103,6 +101,6 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: busybox-armhf-glibc221-debian8
+          name: busybox-armhf-glibc224-debian9
           path: busybox
           if-no-files-found: error
