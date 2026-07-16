@@ -25,14 +25,19 @@ jobs:
       - name: Build inside Debian 8 (Jessie) armhf container
         uses: uraimo/run-on-arch-action@v2
         with:
+          # run-on-arch-action 没有内置 debian8 的 Dockerfile，直接用官方的
+          # armhf Debian 8 (Jessie) 基础镜像。arch 仍用于选择 QEMU 静态解释器。
           arch: armv7
-          # 关键点：指定古老的 debian8 发行版，其自带的 glibc 即为 2.21 级别
-          distro: debian8
+          base_image: arm32v7/debian:jessie
 
           run: |
             set -eu
-            # 1. 更新古老发行版的软件源并安装基础编译工具
-            #    binutils 提供 readelf / objdump 用于后面的验证
+            # 1. 修正软件源并安装基础编译工具
+            #    Debian 8 (Jessie) 已 EOL，官方镜像已迁移到 archive.debian.org，
+            #    默认源会 404；需改用归档源并关闭 Valid-Until 过期校验。
+            #    binutils 提供 readelf / objdump 用于后面的验证。
+            printf 'deb http://archive.debian.org/debian jessie main\n' > /etc/apt/sources.list
+            echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
             apt-get update && apt-get install -y gcc make bzip2 binutils
 
             # 2. 验证当前环境的 glibc 版本
