@@ -20,12 +20,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Primary is the requested musl.cc URL; the more.musl.cc mirror (GCC 11,
-  # matching the primary) is a fallback since musl.cc can be flaky from CI.
-  TOOLCHAIN_URLS: |
+  # musl.cc is the requested source, but its hosts (musl.cc / more.musl.cc)
+  # refuse connections from GitHub-hosted runners, so we fall back to an
+  # equivalent musl armhf toolchain mirrored on github.com (always reachable).
+  # musl.cc is still tried first, with a short timeout, to honour the request.
+  # The toolchain prefix is auto-detected after extraction, so either the
+  # arm-linux-musleabihf- or arm-unknown-linux-musleabihf- triple works.
+  TOOLCHAIN_SOURCES: |
     https://musl.cc/arm-linux-musleabihf-cross.tgz
-    https://more.musl.cc/11/x86_64-linux-musl/arm-linux-musleabihf-cross.tgz
-  CROSS: arm-linux-musleabihf-
+    https://github.com/cross-tools/musl-cross/releases/download/20260515/arm-unknown-linux-musleabihf.tar.xz
   TAG: busybox-arm-musl-static
 
 jobs:
@@ -43,26 +46,36 @@ jobs:
       - name: Fetch musl cross toolchain
         run: |
           set -eu
-          ok=
+          mkdir -p "$HOME/tc"
+          used=
           for attempt in 1 2 3; do
-            for url in $TOOLCHAIN_URLS; do
+            for url in $TOOLCHAIN_SOURCES; do
               echo "attempt $attempt: $url"
-              # Fail fast on a stalled mirror instead of hanging: cap the whole
-              # transfer and require steady progress.
+              case "$url" in *.tar.xz) f=/tmp/tc.tar.xz;; *) f=/tmp/tc.tgz;; esac
+              # Fail fast on a stalled/blocked host instead of hanging.
               if wget -q --tries=1 --timeout=60 --dns-timeout=30 \
-                      --connect-timeout=30 --read-timeout=120 \
-                      "$url" -O /tmp/toolchain.tgz && tar tzf /tmp/toolchain.tgz >/dev/null 2>&1; then
-                echo "downloaded from $url"; ok=1; break
+                      --connect-timeout=30 --read-timeout=180 \
+                      "$url" -O "$f" && tar tf "$f" >/dev/null 2>&1; then
+                tar xf "$f" -C "$HOME/tc"   # GNU tar auto-detects gzip/xz
+                used="$url"; echo "downloaded from $url"; break
               fi
-              echo "  failed: $url"; rm -f /tmp/toolchain.tgz
+              echo "  unavailable: $url"; rm -f "$f"
             done
-            [ -n "$ok" ] && break
-            echo "all mirrors failed on attempt $attempt, retrying in 10s..."; sleep 10
+            [ -n "$used" ] && break
+            echo "no source reachable on attempt $attempt, retrying in 10s..."; sleep 10
           done
-          [ -n "$ok" ] || { echo "ERROR: could not fetch the musl toolchain"; exit 1; }
-          mkdir -p "$HOME/toolchain"
-          tar xzf /tmp/toolchain.tgz -C "$HOME/toolchain"
-          echo "$HOME/toolchain/arm-linux-musleabihf-cross/bin" >> "$GITHUB_PATH"
+          [ -n "$used" ] || { echo "ERROR: could not fetch any musl toolchain"; exit 1; }
+          # Auto-detect the cross gcc, then derive the prefix and bin directory.
+          gcc_bin="$(find "$HOME/tc" -type f -name '*-linux-musleabihf-gcc' | head -1)"
+          [ -n "$gcc_bin" ] || { echo "ERROR: no *-gcc found in toolchain"; find "$HOME/tc" -maxdepth 3 | head -50; exit 1; }
+          bin_dir="$(dirname "$gcc_bin")"
+          cross="$(basename "$gcc_bin" | sed 's/gcc$//')"
+          echo "toolchain source : $used"
+          echo "detected prefix  : $cross"
+          echo "bin directory    : $bin_dir"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+          echo "CROSS=$cross" >> "$GITHUB_ENV"
+          echo "TC_SOURCE=$used" >> "$GITHUB_ENV"
 
       - name: Configure (static + cross + disable x86-only SHA HWACCEL)
         run: |
@@ -121,7 +134,7 @@ jobs:
             echo "Fully static **32-bit ARM (armhf, hard-float)** BusyBox, built entirely in CI"
             echo "by this repository's \`Build & release ARM musl static busybox\` workflow."
             echo
-            echo "- **Toolchain:** \`arm-linux-musleabihf-cross\` (musl) from <https://musl.cc/arm-linux-musleabihf-cross.tgz>"
+            echo "- **Toolchain:** musl \`${CROSS%-}\` cross-compiler, from <${TC_SOURCE}>"
             echo "- **Linking:** \`CONFIG_STATIC=y\` — no shared libraries, no dynamic loader"
             echo "- **BusyBox:** ${BB_VER}, ${APPLETS} applets"
             echo "- **Disabled feature:** x86-only SHA hardware acceleration"
