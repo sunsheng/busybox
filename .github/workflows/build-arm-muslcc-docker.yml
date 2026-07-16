@@ -31,19 +31,24 @@ jobs:
         run: |
           set -eu
           docker run --rm -v "$PWD:/src" -w /src "$IMAGE" sh -euxc '
-            # Alpine image: install make/perl/tar for the build, plus a *native*
-            # gcc (HOSTCC) — busybox first compiles host tools like fixdep, which
-            # must run on the x86_64 build host, not the ARM target.
+            # In this image the *unprefixed* /bin/gcc IS the arm-linux-musleabihf
+            # cross compiler, and there is no native compiler. busybox, however,
+            # needs BOTH a native HOSTCC (to build host tools like fixdep, which
+            # run on x86_64) and the ARM cross compiler for the target.
+            #
+            # 1) install a native x86_64 gcc (from apk, into /usr/bin) for HOSTCC;
+            #    plain "gcc" then resolves to it (/usr/bin precedes /bin on PATH).
             apk add --no-cache make bash perl tar bzip2 gcc musl-dev
-            # The musl cross toolchain ships in the image but its bin dir is not
-            # on PATH; auto-detect it and derive the CROSS_COMPILE prefix.
-            cross_gcc=$(find / -type f -name "*-linux-musleabihf-gcc" 2>/dev/null | head -1)
-            [ -n "$cross_gcc" ] || { echo "ERROR: cross gcc not found in image"; exit 1; }
-            bindir=$(dirname "$cross_gcc")
-            cross=$(basename "$cross_gcc" | sed "s/gcc$//")
-            export PATH="$bindir:$PATH"
-            echo "cross prefix: $cross ; bin dir: $bindir"
-            "${cross}gcc" --version | head -1
+            # 2) give the image cross tools a conventional target-triple prefix so
+            #    CROSS_COMPILE cleanly selects them, keeping host vs target separate.
+            cross=arm-linux-musleabihf-
+            mkdir -p /opt/xtc
+            for t in gcc cc ld as ar nm strip objcopy ranlib readelf objdump; do
+              ln -sf "/bin/$t" "/opt/xtc/${cross}${t}"
+            done
+            export PATH="/opt/xtc:$PATH"
+            "${cross}gcc" --version | head -1   # ARM cross compiler
+            gcc --version | head -1             # native HOSTCC
             make defconfig
             # Static linking against musl:
             sed -i "s/# CONFIG_STATIC is not set/CONFIG_STATIC=y/" .config
