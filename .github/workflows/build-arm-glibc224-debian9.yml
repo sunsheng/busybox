@@ -1,0 +1,113 @@
+name: Build with GLIBC 2.24 (Debian 9)
+
+# Builds a 32-bit ARM (armv7/armhf) BusyBox against an old glibc (2.24) by
+# compiling *inside* a Debian 9 "Stretch" armhf container via QEMU. GNU gcc is
+# used (not musl / not cross): the build is native inside the emulated armhf
+# container, and glibc is linked DYNAMICALLY (not static) — this keeps the
+# binary small and compatible with old ARM systems running glibc 2.24.
+#
+# Stretch is chosen over jessie because it ships glibc 2.24 with gcc 6.3 and,
+# crucially, linux-libc-dev 4.9 kernel headers — modern BusyBox needs the newer
+# CAN/netlink UAPI constants that jessie's 3.16 headers lack.
+#
+# Requirement enforced below: the binary may depend on glibc's shared libraries
+# only. It must be a dynamic executable (an INTERP / ld-linux loader present),
+# and every NEEDED entry must be a glibc library (libc/libm/libdl/libpthread/
+# librt/libresolv/libcrypt/libnss_* + ld-linux-armhf). Any other shared-library
+# dependency (libz, libssl, libselinux, libpam, ...) fails the job. Verified
+# with both readelf (-d NEEDED / -l INTERP) and objdump (-p).
+on:
+  pull_request:
+  release:
+    types: [published]
+
+jobs:
+  build_legacy_glibc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build inside Debian 9 (Stretch) armhf container
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          # run-on-arch-action 没有内置 stretch 的 Dockerfile，直接用官方的
+          # armhf Debian 9 (Stretch) 基础镜像。arch 仍用于选择 QEMU 静态解释器。
+          arch: armv7
+          base_image: arm32v7/debian:stretch
+
+          run: |
+            set -eu
+            # 1. 修正软件源并安装基础编译工具
+            #    Debian 9 (Stretch) 已 EOL，官方镜像已迁移到 archive.debian.org，
+            #    默认源会 404；需改用归档源并关闭 Valid-Until / 过期签名校验。
+            #    同时加入 security（stretch/updates）套件：基础镜像里已预装了带安全
+            #    更新（+deb9u*）的库，只用 main 会导致版本无法满足依赖。
+            #    binutils 提供 readelf / objdump 用于后面的验证。
+            {
+              echo 'deb http://archive.debian.org/debian stretch main'
+              echo 'deb http://archive.debian.org/debian-security stretch/updates main'
+            } > /etc/apt/sources.list
+            echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
+            apt-get -o Acquire::AllowInsecureRepositories=true update
+            apt-get install -y --allow-unauthenticated gcc make bzip2 binutils file
+
+            # 2. 验证当前环境的 glibc 版本（stretch 为 2.24）
+            ldd --version
+
+            # 3. 正常执行编译（GNU gcc，原生 armhf 编译）
+            #    defconfig 默认动态链接（不加 CONFIG_STATIC），glibc 以动态库形式链接
+            make defconfig
+            # 关闭 x86 专用的 SHA-NI 硬件加速：sha1_process_block64_shaNI 是
+            # Intel SHA 扩展代码，在 ARM 上无法编译（与 musl 那个 workflow 同样处理）。
+            sed -i 's/CONFIG_SHA1_HWACCEL=y/# CONFIG_SHA1_HWACCEL is not set/' .config
+            sed -i 's/CONFIG_SHA256_HWACCEL=y/# CONFIG_SHA256_HWACCEL is not set/' .config
+            # 关闭 ip/iplink 的 CAN 支持：它引用了 IFLA_CAN_TERMINATION 等最新的
+            # CAN netlink 常量，stretch 的 4.9 内核头文件仍未包含。CAN 是很小众的
+            # 功能（ip link set canX termination ...），关掉即可，不影响其它 applet。
+            sed -i 's/CONFIG_FEATURE_IP_LINK_CAN=y/# CONFIG_FEATURE_IP_LINK_CAN is not set/' .config
+            yes "" | make oldconfig
+            make -j"$(nproc)"
+
+            # 4. 验证：必须是动态链接可执行文件，且除 glibc 外没有任何其他动态库依赖
+            file busybox
+            echo "===== readelf -d (dynamic section, NEEDED) ====="
+            readelf -d busybox | grep NEEDED || true
+            echo "===== readelf -l (program headers, INTERP) ====="
+            readelf -l busybox | grep INTERP || true
+            echo "===== objdump -p (dynamic + version refs) ====="
+            objdump -p busybox | grep -E 'NEEDED|GLIBC' || true
+
+            echo "===== 校验动态依赖只能是 glibc ====="
+            # 4a. 必须存在动态加载器 INTERP（即：不是静态链接）
+            if ! readelf -l busybox | grep -q INTERP; then
+              echo "ERROR: 没有 INTERP 段 —— 这是静态链接的二进制，不符合要求（需要动态链接 glibc）"; exit 1
+            fi
+            # 4b. 遍历所有 NEEDED 条目，只允许 glibc 提供的共享库
+            #     glibc 提供：libc/libm/libdl/libpthread/librt/libresolv/libcrypt/libutil/libnss_*/libanl
+            #     以及动态加载器 ld-linux-armhf.so.3 / ld-linux.so.3
+            allow='^(libc|libm|libdl|libpthread|librt|libresolv|libcrypt|libutil|libanl|libnss_[a-z0-9]+|ld-linux(-armhf)?)\.so'
+            bad=0
+            for lib in $(readelf -d busybox | awk -F'[][]' '/NEEDED/ {print $2}'); do
+              if echo "$lib" | grep -Eq "$allow"; then
+                echo "OK  (glibc): $lib"
+              else
+                echo "BAD (非 glibc 依赖): $lib"; bad=1
+              fi
+            done
+            if [ "$bad" -ne 0 ]; then
+              echo "ERROR: 发现 glibc 之外的动态库依赖，不符合要求"; exit 1
+            fi
+            echo "PASS: 动态链接 glibc，且没有任何其他动态库依赖"
+
+            # 5. 冒烟测试
+            ./busybox | head -1
+            echo "applets: $(./busybox --list | wc -l)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: busybox-armhf-glibc224-debian9
+          path: busybox
+          if-no-files-found: error
