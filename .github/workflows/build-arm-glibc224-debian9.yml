@@ -48,7 +48,7 @@ jobs:
             } > /etc/apt/sources.list
             echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
             apt-get -o Acquire::AllowInsecureRepositories=true update
-            apt-get install -y --allow-unauthenticated gcc make bzip2 binutils
+            apt-get install -y --allow-unauthenticated gcc make bzip2 binutils file
 
             # 2. 验证当前环境的 glibc 版本（stretch 为 2.24）
             ldd --version
