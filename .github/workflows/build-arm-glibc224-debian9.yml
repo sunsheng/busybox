@@ -60,6 +60,10 @@ jobs:
             # Intel SHA 扩展代码，在 ARM 上无法编译（与 musl 那个 workflow 同样处理）。
             sed -i 's/CONFIG_SHA1_HWACCEL=y/# CONFIG_SHA1_HWACCEL is not set/' .config
             sed -i 's/CONFIG_SHA256_HWACCEL=y/# CONFIG_SHA256_HWACCEL is not set/' .config
+            # 关闭 ip/iplink 的 CAN 支持：它引用了 IFLA_CAN_TERMINATION 等最新的
+            # CAN netlink 常量，stretch 的 4.9 内核头文件仍未包含。CAN 是很小众的
+            # 功能（ip link set canX termination ...），关掉即可，不影响其它 applet。
+            sed -i 's/CONFIG_FEATURE_IP_LINK_CAN=y/# CONFIG_FEATURE_IP_LINK_CAN is not set/' .config
             yes "" | make oldconfig
             make -j"$(nproc)"
 
