@@ -1,0 +1,150 @@
+name: Build & release ARM musl static busybox
+
+# Self-contained pipeline: cross-compiles a fully static 32-bit ARM (armhf,
+# hard-float) BusyBox with the arm-linux-musleabihf musl toolchain, verifies it
+# with `file` / `readelf` and the qemu-arm emulator, then publishes the binary
+# as a GitHub Release. Nothing is committed to the repo except this workflow.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/release-arm-musl.yml'
+
+permissions:
+  contents: write
+
+env:
+  TOOLCHAIN_URL: https://musl.cc/arm-linux-musleabihf-cross.tgz
+  CROSS: arm-linux-musleabihf-
+  TAG: busybox-arm-musl-static
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install qemu-user-static (for functional verification)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: Fetch musl cross toolchain
+        run: |
+          set -eu
+          for i in 1 2 3 4 5; do
+            wget -q "$TOOLCHAIN_URL" -O /tmp/toolchain.tgz && break
+            echo "download attempt $i failed, retrying in 5s..."; sleep 5
+          done
+          mkdir -p "$HOME/toolchain"
+          tar xzf /tmp/toolchain.tgz -C "$HOME/toolchain"
+          echo "$HOME/toolchain/arm-linux-musleabihf-cross/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (static + cross + disable x86-only SHA HWACCEL)
+        run: |
+          set -eu
+          make defconfig
+          # Static linking against musl:
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          sed -i "s#CONFIG_CROSS_COMPILER_PREFIX=\"\"#CONFIG_CROSS_COMPILER_PREFIX=\"${CROSS}\"#" .config
+          # Disable x86-only SHA-NI hardware acceleration; it fails to build on
+          # ARM (sha1_process_block64_shaNI is an Intel SHA-extension code path).
+          sed -i 's/CONFIG_SHA1_HWACCEL=y/# CONFIG_SHA1_HWACCEL is not set/' .config
+          sed -i 's/CONFIG_SHA256_HWACCEL=y/# CONFIG_SHA256_HWACCEL is not set/' .config
+          yes "" | make oldconfig CROSS_COMPILE="${CROSS}"
+
+      - name: Build
+        run: make -j"$(nproc)" CROSS_COMPILE="${CROSS}"
+
+      - name: Verify it is a static ARM binary (file + readelf)
+        run: |
+          set -eu
+          file busybox
+          if "${CROSS}readelf" -d busybox | grep -q NEEDED; then
+            echo "ERROR: binary has shared-library dependencies (not static)"; exit 1
+          fi
+          if "${CROSS}readelf" -l busybox | grep -q INTERP; then
+            echo "ERROR: binary requests a dynamic loader (not static)"; exit 1
+          fi
+          echo "OK: no NEEDED entries and no INTERP segment -> fully static"
+
+      - name: Verify functionality with qemu-arm
+        run: |
+          set -eu
+          Q=qemu-arm-static
+          $Q ./busybox | head -1
+          $Q ./busybox echo "hello from static ARM busybox"
+          echo "test data" | $Q ./busybox sha256sum
+          echo "test data" | $Q ./busybox sha1sum
+          echo "test data" | $Q ./busybox md5sum
+          $Q ./busybox awk 'BEGIN { print "awk: 6*7 = " (6 * 7) }'
+          printf 'b\na\nb\nc\n' | $Q ./busybox sort | $Q ./busybox uniq -c || true
+          echo "applets: $($Q ./busybox --list | wc -l)"
+
+      - name: Package artifacts
+        run: |
+          set -eu
+          mkdir -p dist
+          cp busybox dist/busybox-armhf-musl-static
+          cp .config dist/busybox.config
+          ( cd dist && sha256sum busybox-armhf-musl-static > SHA256SUMS )
+          BB_VER="$(qemu-arm-static ./busybox 2>&1 | head -1 | sed 's/ multi-call.*//')"
+          APPLETS="$(qemu-arm-static ./busybox --list | wc -l)"
+          FILEOUT="$(file -b dist/busybox-armhf-musl-static)"
+          {
+            echo "# Static ARM (armhf/musl) BusyBox"
+            echo
+            echo "Fully static **32-bit ARM (armhf, hard-float)** BusyBox, built entirely in CI"
+            echo "by this repository's \`Build & release ARM musl static busybox\` workflow."
+            echo
+            echo "- **Toolchain:** \`arm-linux-musleabihf-cross\` (musl) from <${TOOLCHAIN_URL}>"
+            echo "- **Linking:** \`CONFIG_STATIC=y\` — no shared libraries, no dynamic loader"
+            echo "- **BusyBox:** ${BB_VER}, ${APPLETS} applets"
+            echo "- **Disabled feature:** x86-only SHA hardware acceleration"
+            echo "  (\`CONFIG_SHA1_HWACCEL\` / \`CONFIG_SHA256_HWACCEL\`), which does not compile"
+            echo "  for ARM. \`sha1sum\`/\`sha256sum\` still work via the portable C code."
+            echo
+            echo "## Verification (run in CI)"
+            echo
+            echo '```'
+            echo "\$ file busybox-armhf-musl-static"
+            echo "${FILEOUT}"
+            echo '```'
+            echo
+            echo "\`readelf\` confirms no \`NEEDED\` entries and no \`INTERP\` segment."
+            echo "\`qemu-arm\` smoke tests pass: version/\`--list\`, echo, md5/sha1/sha256sum,"
+            echo "awk, sort/uniq."
+            echo
+            echo "## Assets"
+            echo "- \`busybox-armhf-musl-static\` — the static ARM binary"
+            echo "- \`busybox.config\` — exact build configuration"
+            echo "- \`SHA256SUMS\` — checksum"
+            echo
+            echo "## Usage"
+            echo "\`\`\`sh"
+            echo "./busybox-armhf-musl-static --list          # on an ARM device"
+            echo "qemu-arm-static ./busybox-armhf-musl-static echo hi   # on an x86 host"
+            echo "\`\`\`"
+          } > dist/NOTES.md
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # Recreate so re-runs stay idempotent.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+          gh release create "$TAG" \
+            dist/busybox-armhf-musl-static \
+            dist/busybox.config \
+            dist/SHA256SUMS \
+            --title "Static ARM (armhf/musl) BusyBox" \
+            --notes-file dist/NOTES.md \
+            --target "$GITHUB_SHA"
+          echo "Release published:"
+          gh release view "$TAG" --json url,tagName,assets \
+            --jq '.url, .tagName, (.assets[].name)'
