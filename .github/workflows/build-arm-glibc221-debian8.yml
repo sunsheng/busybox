@@ -1,0 +1,48 @@
+name: Build with GLIBC 2.21 (Debian 8)
+
+# Builds a 32-bit ARM (armv7/armhf) BusyBox against an old glibc (2.21 level)
+# by compiling *inside* a Debian 8 "Jessie" armhf container via QEMU. Linking
+# against glibc 2.21 keeps the binary compatible with old ARM systems. GNU gcc
+# is used (not musl / not cross): the build is native inside the emulated armhf
+# container. objdump confirms the GLIBC symbol versions the binary depends on.
+on: [push]
+
+jobs:
+  build_legacy_glibc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build inside Debian 8 (Jessie) armhf container
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: armv7
+          # 关键点：指定古老的 debian8 发行版，其自带的 glibc 即为 2.21 级别
+          distro: debian8
+
+          run: |
+            set -eu
+            # 1. 更新古老发行版的软件源并安装基础编译工具
+            apt-get update && apt-get install -y gcc make bzip2
+
+            # 2. 验证当前环境的 glibc 版本
+            ldd --version
+
+            # 3. 正常执行编译（GNU gcc，原生 armhf 编译）
+            make defconfig
+            make -j"$(nproc)"
+
+            # 4. 验证生成的二进制文件符号信息
+            file busybox
+            objdump -p busybox | grep GLIBC || true
+            ./busybox | head -1
+            echo "applets: $(./busybox --list | wc -l)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: busybox-armhf-glibc221-debian8
+          path: busybox
+          if-no-files-found: error

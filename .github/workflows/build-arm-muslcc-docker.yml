@@ -1,0 +1,106 @@
+name: Build ARM musl static busybox (muslcc Docker Hub image)
+
+# Cross-compiles a fully static 32-bit ARM (armhf, hard-float) BusyBox using the
+# official muslcc toolchain distributed as a Docker Hub image
+# (docker.io/muslcc/x86_64:arm-linux-musleabihf-cross). The whole build runs
+# *inside* that container, so the arm-linux-musleabihf- toolchain is already on
+# PATH — no tarball download or mirror fallback needed. The resulting binary is
+# verified with file / readelf and qemu-arm, then uploaded as a CI artifact.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/build-arm-muslcc-docker.yml'
+
+# A newer run supersedes an in-progress one.
+concurrency:
+  group: build-arm-muslcc-docker
+  cancel-in-progress: true
+
+env:
+  # Official muslcc image on Docker Hub. It ships the arm-linux-musleabihf-
+  # musl cross toolchain preinstalled and on PATH.
+  CROSS: arm-linux-musleabihf-
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Run the build inside the muslcc Docker Hub image.
+    container:
+      image: muslcc/x86_64:arm-linux-musleabihf-cross
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites in the container
+        run: |
+          set -eu
+          # The muslcc image is Alpine-based; make/bash/etc. may be missing.
+          if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache make bash perl tar
+          fi
+          echo "compiler: $(command -v ${CROSS}gcc)"
+          ${CROSS}gcc --version | head -1
+
+      - name: Configure (static + cross + disable x86-only SHA HWACCEL)
+        run: |
+          set -eu
+          make defconfig
+          # Static linking against musl:
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          sed -i "s#CONFIG_CROSS_COMPILER_PREFIX=\"\"#CONFIG_CROSS_COMPILER_PREFIX=\"${CROSS}\"#" .config
+          # Disable x86-only SHA-NI hardware acceleration; it does not build for ARM.
+          sed -i 's/CONFIG_SHA1_HWACCEL=y/# CONFIG_SHA1_HWACCEL is not set/' .config
+          sed -i 's/CONFIG_SHA256_HWACCEL=y/# CONFIG_SHA256_HWACCEL is not set/' .config
+          yes "" | make oldconfig CROSS_COMPILE="${CROSS}"
+
+      - name: Build
+        run: make -j"$(nproc)" CROSS_COMPILE="${CROSS}"
+
+      - name: Verify it is a static ARM binary (file + readelf)
+        run: |
+          set -eu
+          file busybox || true
+          if "${CROSS}readelf" -d busybox | grep -q NEEDED; then
+            echo "ERROR: binary has shared-library dependencies (not static)"; exit 1
+          fi
+          if "${CROSS}readelf" -l busybox | grep -q INTERP; then
+            echo "ERROR: binary requests a dynamic loader (not static)"; exit 1
+          fi
+          echo "OK: no NEEDED entries and no INTERP segment -> fully static"
+
+      - name: Verify functionality with qemu-arm
+        run: |
+          set -eu
+          # Install a static qemu-arm inside the container to smoke-test the binary.
+          if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache qemu-arm || true
+          fi
+          if command -v qemu-arm >/dev/null 2>&1; then
+            Q=qemu-arm
+          elif command -v qemu-arm-static >/dev/null 2>&1; then
+            Q=qemu-arm-static
+          else
+            echo "qemu-arm not available; skipping functional test"; exit 0
+          fi
+          $Q ./busybox | head -1
+          $Q ./busybox echo "hello from static ARM busybox (muslcc image)"
+          echo "test data" | $Q ./busybox sha256sum
+          $Q ./busybox awk 'BEGIN { print "awk: 6*7 = " (6 * 7) }'
+          echo "applets: $($Q ./busybox --list | wc -l)"
+
+      - name: Package artifacts
+        run: |
+          set -eu
+          mkdir -p dist
+          cp busybox dist/busybox-armhf-musl-static
+          cp .config dist/busybox.config
+          ( cd dist && sha256sum busybox-armhf-musl-static > SHA256SUMS )
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: busybox-armhf-musl-static-muslcc
+          path: dist/
+          if-no-files-found: error
