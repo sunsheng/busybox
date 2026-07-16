@@ -34,11 +34,17 @@ jobs:
             set -eu
             # 1. 修正软件源并安装基础编译工具
             #    Debian 8 (Jessie) 已 EOL，官方镜像已迁移到 archive.debian.org，
-            #    默认源会 404；需改用归档源并关闭 Valid-Until 过期校验。
+            #    默认源会 404；需改用归档源并关闭 Valid-Until / 过期签名校验。
+            #    必须同时加入 security（jessie/updates）套件：基础镜像里已预装了
+            #    带安全更新（+deb8u*）的库，只用 main（+b*）会导致版本无法满足依赖。
             #    binutils 提供 readelf / objdump 用于后面的验证。
-            printf 'deb http://archive.debian.org/debian jessie main\n' > /etc/apt/sources.list
+            {
+              echo 'deb http://archive.debian.org/debian jessie main'
+              echo 'deb http://archive.debian.org/debian-security jessie/updates main'
+            } > /etc/apt/sources.list
             echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
-            apt-get update && apt-get install -y gcc make bzip2 binutils
+            apt-get -o Acquire::AllowInsecureRepositories=true update
+            apt-get install -y --allow-unauthenticated gcc make bzip2 binutils
 
             # 2. 验证当前环境的 glibc 版本
             ldd --version
